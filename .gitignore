@@ -23,3 +23,8 @@ analyze_*.py
 parse_*.py
 check_*.py
 find_*.py
+test_*.py
+kakao_crawler.py
+
+# Claude 내부 파일
+.claude/
