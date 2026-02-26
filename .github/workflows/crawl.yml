@@ -1,9 +1,9 @@
-name: Daily Crawl
+name: Weekly Crawl
 
 on:
   schedule:
-    # 매일 한국시간 오전 9시 = UTC 00:00
-    - cron: '0 0 * * *'
+    # 매주 목요일 한국시간 오후 1시 = UTC 04:00 (목요일 = 4)
+    - cron: '0 4 * * 4'
   workflow_dispatch:  # 수동 실행 버튼도 활성화
 
 jobs:
