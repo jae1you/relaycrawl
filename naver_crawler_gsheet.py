@@ -4,7 +4,7 @@ from playwright.async_api import async_playwright
 from datetime import datetime
 from gsheet_utils import save_to_google_sheets
 
-STORE_URL = "https://smartstore.naver.com/lux_man/products"
+STORE_URL = "https://smartstore.naver.com/lux_man/category/ALL"
 
 
 async def crawl_naver_store():
