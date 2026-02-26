@@ -1,0 +1,25 @@
+# 민감 정보
+credentials.json
+
+# 크롤링 중 생성되는 임시 파일
+*.html
+*.png
+*.xlsx
+
+# 로그
+scheduler.log
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# 검사/디버그용 스크립트 (선택적 제외)
+inspect_*.py
+debug_*.py
+analyze_*.py
+parse_*.py
+check_*.py
+find_*.py
