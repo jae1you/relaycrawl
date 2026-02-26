@@ -13,6 +13,7 @@ from datetime import datetime
 # 각 크롤러의 메인 함수 임포트
 from naver_crawler_gsheet import crawl_naver_store
 from halfclub_crawler_gsheet import crawl_halfclub
+from kakao_crawler_gsheet import crawl_kakao_store
 
 # 로그 설정 (콘솔 + 파일 동시 출력)
 logging.basicConfig(
@@ -32,20 +33,28 @@ def run_all_crawlers():
     log.info("=" * 60)
 
     # 1. 네이버 MZ아울렛 크롤링
-    log.info("[1/2] 네이버 MZ아울렛 크롤러 시작")
+    log.info("[1/3] 네이버 MZ아울렛 크롤러 시작")
     try:
         asyncio.run(crawl_naver_store())
-        log.info("[1/2] 네이버 MZ아울렛 크롤러 완료")
+        log.info("[1/3] 네이버 MZ아울렛 크롤러 완료")
     except Exception as e:
-        log.error(f"[1/2] 네이버 MZ아울렛 크롤러 에러: {e}")
+        log.error(f"[1/3] 네이버 MZ아울렛 크롤러 에러: {e}")
 
     # 2. 하프클럽 크롤링
-    log.info("[2/2] 하프클럽 크롤러 시작")
+    log.info("[2/3] 하프클럽 크롤러 시작")
     try:
         asyncio.run(crawl_halfclub())
-        log.info("[2/2] 하프클럽 크롤러 완료")
+        log.info("[2/3] 하프클럽 크롤러 완료")
     except Exception as e:
-        log.error(f"[2/2] 하프클럽 크롤러 에러: {e}")
+        log.error(f"[2/3] 하프클럽 크롤러 에러: {e}")
+
+    # 3. 카카오 세이브프라자 크롤링
+    log.info("[3/3] 카카오 세이브프라자 크롤러 시작")
+    try:
+        asyncio.run(crawl_kakao_store())
+        log.info("[3/3] 카카오 세이브프라자 크롤러 완료")
+    except Exception as e:
+        log.error(f"[3/3] 카카오 세이브프라자 크롤러 에러: {e}")
 
     log.info(f"전체 스케줄 실행 완료: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     log.info("=" * 60)

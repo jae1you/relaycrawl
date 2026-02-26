@@ -23,7 +23,7 @@ jobs:
 
       - name: 의존성 설치
         run: |
-          pip install playwright gspread oauth2client schedule
+          pip install playwright gspread oauth2client schedule openai
           playwright install chromium
           playwright install-deps chromium
 
@@ -35,3 +35,8 @@ jobs:
 
       - name: 하프클럽 크롤링
         run: python halfclub_crawler_gsheet.py
+
+      - name: 카카오 세이브프라자 크롤링
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python kakao_crawler_gsheet.py
