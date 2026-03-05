@@ -1,0 +1,5 @@
+playwright
+gspread
+oauth2client
+schedule
+openai
