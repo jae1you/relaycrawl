@@ -1,9 +1,12 @@
 import asyncio
 import json
 import logging
+import re
+from datetime import datetime
+
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
-from datetime import datetime
+
 from gsheet_utils import save_to_google_sheets
 
 # 로그 설정
@@ -11,6 +14,146 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 STORE_URL = "https://smartstore.naver.com/lux_man/category/ALL"
+PRODUCTS_PER_PAGE = 40
+MAX_PAGE_RETRY = 3
+CODE_RE = re.compile(r'^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d]{6,20}$')
+
+
+def _extract_json_object(text, marker):
+    marker_idx = text.find(marker)
+    if marker_idx == -1:
+        return None
+
+    start = text.find("{", marker_idx)
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for i in range(start, len(text)):
+        ch = text[i]
+
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+
+    return None
+
+
+def _walk_dict_paths(data, paths):
+    for path in paths:
+        node = data
+        ok = True
+        for key in path:
+            if not isinstance(node, dict) or key not in node:
+                ok = False
+                break
+            node = node[key]
+        if ok:
+            return node
+    return None
+
+
+def _parse_products_from_state(state):
+    category_root = state.get("category", {}) if isinstance(state, dict) else {}
+    category_node = category_root.get("A") if isinstance(category_root, dict) and "A" in category_root else None
+    if category_node is None and isinstance(category_root, dict) and category_root:
+        first_key = next(iter(category_root), None)
+        category_node = category_root.get(first_key) if first_key is not None else None
+
+    products = []
+    total_count = None
+
+    if isinstance(category_node, dict):
+        products = category_node.get("simpleProducts", []) or []
+        total_count = category_node.get("totalCount")
+
+    if not products:
+        fallback_products = _walk_dict_paths(
+            state,
+            [
+                ("smartStore", "category", "product", "list", "content"),
+                ("smartStore", "category", "product", "simpleItemList", "content"),
+                ("search", "products"),
+            ],
+        )
+        if isinstance(fallback_products, list):
+            products = fallback_products
+
+        fallback_total = _walk_dict_paths(
+            state,
+            [
+                ("smartStore", "category", "product", "list", "totalCount"),
+                ("smartStore", "category", "product", "simpleItemList", "totalCount"),
+            ],
+        )
+        if isinstance(fallback_total, int):
+            total_count = fallback_total
+
+    return products, total_count
+
+
+def _split_name_fields(name):
+    text = (name or "").strip()
+    if not text:
+        return "", ""
+
+    tokens = text.split()
+    brand = tokens[0] if tokens else ""
+    code = ""
+
+    if tokens:
+        tail = re.sub(r"[^A-Za-z0-9]", "", tokens[-1])
+        if CODE_RE.match(tail):
+            code = tail
+
+    return brand, code
+
+
+async def _extract_state(page):
+    try:
+        state = await page.evaluate("() => window.__PRELOADED_STATE__ || null")
+        if isinstance(state, dict):
+            return state
+    except Exception:
+        pass
+
+    content = await page.content()
+    json_text = _extract_json_object(content, "window.__PRELOADED_STATE__=")
+    if not json_text:
+        json_text = _extract_json_object(content, "window.__PRELOADED_STATE__ =")
+    if not json_text:
+        return None
+
+    try:
+        return json.loads(json_text)
+    except Exception:
+        return None
+
+
+def _is_blocked_or_error(title, html):
+    t = (title or "").lower()
+    if any(x in t for x in ["forbidden", "access denied", "에러", "오류", "차단"]):
+        return True
+
+    body = (html or "")[:5000].lower()
+    return any(x in body for x in ["시스템오류", "forbidden", "captcha", "차단"])
 
 
 async def crawl_naver_store():
@@ -25,7 +168,9 @@ async def crawl_naver_store():
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={'width': 1920, 'height': 1080}
+            viewport={"width": 1920, "height": 1080},
+            locale="ko-KR",
+            timezone_id="Asia/Seoul",
         )
         page = await context.new_page()
 
@@ -33,88 +178,96 @@ async def crawl_naver_store():
             url = f"{STORE_URL}?cp={current_page}"
             logger.info(f"[{current_page}] 페이지 접속 중: {url}")
 
-            try:
-                await page.goto(url, wait_until="networkidle", timeout=60000)
-                
-                # 페이지 제목 확인 (차단 여부 확인용)
-                title = await page.title()
-                logger.info(f"페이지 제목: {title}")
-                
-                if "차단" in title or "Forbidden" in title:
-                    logger.error("네이버에서 접근이 차단되었습니다.")
-                    break
+            state = None
+            html = ""
 
-                content = await page.content()
+            for attempt in range(1, MAX_PAGE_RETRY + 1):
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    await page.wait_for_timeout(1500)
 
-                start_str = "window.__PRELOADED_STATE__="
-                idx = content.find(start_str)
-                if idx == -1:
-                    logger.warning("JSON 데이터를 찾을 수 없습니다. (종료 혹은 차단 가능성)")
-                    # 디버깅을 위해 스크린샷 저장 (CI 환경용)
-                    if current_page == 1:
-                        await page.screenshot(path="naver_block_debug.png")
-                        logger.info("디버그용 스크린샷 저장 완료: naver_block_debug.png")
-                    break
+                    title = await page.title()
+                    html = await page.content()
+                    logger.info(f"[{current_page}] 페이지 제목: {title} (시도 {attempt}/{MAX_PAGE_RETRY})")
 
-                # JSON 추출 logic 개선: 다음 <script> 태그나 변수 선언 전까지 추출
-                json_part = content[idx + len(start_str):]
-                end_idx = json_part.find("</script>")
-                if end_idx != -1:
-                    json_str = json_part[:end_idx].strip().rstrip(";")
-                else:
-                    json_str = json_part.strip().rstrip(";")
+                    if _is_blocked_or_error(title, html):
+                        logger.warning(f"[{current_page}] 오류/차단 페이지 감지")
+                        if attempt == MAX_PAGE_RETRY:
+                            await page.screenshot(path=f"naver_block_p{current_page}.png")
+                            break
+                        await asyncio.sleep(3 * attempt)
+                        continue
 
-                data = json.loads(json_str)
+                    state = await _extract_state(page)
+                    if state:
+                        break
 
-                category_data = data.get('category', {})
-                category_key = next(iter(category_data), None)
-                if category_key is None:
-                    logger.warning("카테고리 데이터가 없습니다.")
-                    break
+                    logger.warning(f"[{current_page}] PRELOADED_STATE 추출 실패 (시도 {attempt}/{MAX_PAGE_RETRY})")
+                    if attempt == MAX_PAGE_RETRY:
+                        await page.screenshot(path=f"naver_state_fail_p{current_page}.png")
+                        with open(f"naver_state_fail_p{current_page}.html", "w", encoding="utf-8") as f:
+                            f.write(html)
+                        break
 
-                cat_info = category_data[category_key]
-                products = cat_info.get('simpleProducts', [])
+                    await asyncio.sleep(2 * attempt)
 
-                if total_count is None:
-                    total_count = cat_info.get('totalCount', 0)
-                    logger.info(f"전체 상품 개수: {total_count}")
+                except Exception as e:
+                    logger.error(f"[{current_page}] 페이지 로드 에러 (시도 {attempt}/{MAX_PAGE_RETRY}): {e}")
+                    if attempt == MAX_PAGE_RETRY:
+                        await page.screenshot(path=f"naver_error_p{current_page}.png")
+                        break
+                    await asyncio.sleep(2 * attempt)
 
-                if not products:
-                    logger.info(f"[{current_page}] 페이지에 상품이 없습니다. (수집 완료)")
-                    break
+            if not state:
+                logger.error(f"[{current_page}] 페이지 데이터를 추출하지 못해 크롤링을 종료합니다.")
+                break
 
-                for p_item in products:
-                    p_name = p_item.get('name', '')
-                    original_price = p_item.get('salePrice', 0)
-                    benefits = p_item.get('benefitsView', {})
-                    sale_price = benefits.get('discountedSalePrice', 0) or original_price
-                    discount_rate = benefits.get('discountedRatio', 0)
-                    p_id = p_item.get('id', '')
+            products, parsed_total = _parse_products_from_state(state)
 
-                    all_results.append({
+            if total_count is None:
+                total_count = parsed_total or 0
+                logger.info(f"전체 상품 개수: {total_count}")
+
+            if not products:
+                logger.info(f"[{current_page}] 페이지에 상품이 없습니다. (수집 완료)")
+                break
+
+            for p_item in products:
+                p_name = p_item.get("name", "")
+                original_price = p_item.get("salePrice", 0) or 0
+                benefits = p_item.get("benefitsView", {}) or {}
+                sale_price = benefits.get("discountedSalePrice", 0) or original_price
+                discount_rate = benefits.get("discountedRatio", 0) or 0
+                p_id = p_item.get("id", "") or p_item.get("productNo", "")
+
+                brand, product_code = _split_name_fields(p_name)
+
+                all_results.append(
+                    {
                         "스토어": "MZ아울렛",
-                        "브랜드명": p_name.split(' ')[0] if p_name else "",
+                        "브랜드명": brand,
                         "할인율": f"{discount_rate}%" if discount_rate else "0%",
                         "상품명": p_name,
-                        "상품코드": p_name.split(' ')[-1] if p_name else "",
-                        "할인가": f"{sale_price:,}" if sale_price else "0",
-                        "원가": f"{original_price:,}" if original_price else "0",
-                        "상품상세페이지링크": f"https://smartstore.naver.com/lux_man/products/{p_id}",
-                        "수집일시": now
-                    })
+                        "상품코드": product_code,
+                        "할인가": f"{int(sale_price):,}" if sale_price else "0",
+                        "원가": f"{int(original_price):,}" if original_price else "0",
+                        "상품상세페이지링크": f"https://smartstore.naver.com/lux_man/products/{p_id}" if p_id else "",
+                        "수집일시": now,
+                    }
+                )
 
-                logger.info(f"현재까지 {len(all_results)}개 수집됨.")
+            logger.info(f"현재까지 {len(all_results)}개 수집됨.")
 
-                if current_page * 40 >= total_count:
-                    logger.info("전체 상품 수집 완료.")
-                    break
-
-                current_page += 1
-                await asyncio.sleep(1) # 부하 조절
-
-            except Exception as e:
-                logger.error(f"[{current_page}] 페이지 처리 중 에러: {e}")
+            if total_count and len(all_results) >= total_count:
+                logger.info("전체 상품 수집 완료.")
                 break
+
+            if len(products) < PRODUCTS_PER_PAGE:
+                logger.info("마지막 페이지 도달로 판단되어 수집을 종료합니다.")
+                break
+
+            current_page += 1
+            await asyncio.sleep(1)
 
         await browser.close()
 

@@ -1,13 +1,14 @@
 import asyncio
-import re
 import json
-import os
 import logging
-from urllib.parse import parse_qs
+import os
+import re
+from datetime import datetime
+
+from openai import OpenAI
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
-from datetime import datetime
-from openai import OpenAI
+
 from gsheet_utils import save_to_google_sheets
 
 # 로그 설정
@@ -17,8 +18,8 @@ logger = logging.getLogger(__name__)
 CATEGORY_URL = "https://store.kakao.com/kolonsaveplaza/category?sort=POPULAR_SALE_COUNT&showMenu=false"
 BASE_URL = "https://store.kakao.com"
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 CODE_RE = re.compile(r'^(?=.*[A-Za-z])(?=.*[0-9])[A-Za-z0-9]{13,14}$')
 CODE_IN_PAREN = re.compile(r'\(([A-Za-z0-9]{13,14})\)')
@@ -52,7 +53,9 @@ SYSTEM_PROMPT = """당신은 패션 쇼핑몰 상품 제목에서 브랜드명, 
 
 
 def parse_title_by_logic(full_title):
-    title = full_title.strip()
+    title = (full_title or "").strip()
+    if not title:
+        return ("미기재", "미기재", "미기재")
 
     if PROMO_RE.search(title):
         return ("미기재", title, "미기재")
@@ -66,42 +69,49 @@ def parse_title_by_logic(full_title):
         paren_code = paren_match.group(1)
         title = (title[:paren_match.start()] + title[paren_match.end():]).strip().rstrip('/').strip()
 
-    parts = [p.strip() for p in title.split('/') if p.strip()]
+    parts = [p.strip() for p in title.split('/') if p and p.strip()]
+    if not parts:
+        return None
 
     brand = None
-    if parts:
-        first = parts[0]
-        bracket_match = re.match(r'^\[([^\]]+)\]\s*(.*)', first)
-        if bracket_match:
-            tag_content = bracket_match.group(1).strip()
-            remainder = bracket_match.group(2).strip()
-            is_noise = tag_content in NOISE_TAGS or (
-                bool(re.search(r'[가-힣]', tag_content)) and not bool(re.search(r'[A-Za-z]', tag_content))
-            )
-            if is_noise:
-                parts[0] = remainder if remainder else parts.pop(0) or ""
-                if not remainder:
-                    parts.pop(0) if parts else None
+    first = parts[0]
+
+    bracket_match = re.match(r'^\[([^\]]+)\]\s*(.*)', first)
+    if bracket_match:
+        tag_content = bracket_match.group(1).strip()
+        remainder = bracket_match.group(2).strip()
+        is_noise = tag_content in NOISE_TAGS or (
+            bool(re.search(r'[가-힣]', tag_content)) and not bool(re.search(r'[A-Za-z]', tag_content))
+        )
+        if is_noise:
+            if remainder:
+                parts[0] = remainder
             else:
-                brand = tag_content
-                parts[0] = remainder if remainder else None
-                if not remainder:
-                    parts.pop(0)
+                parts = parts[1:]
         else:
-            tag_match = PREFIX_TAG.match(first)
-            if tag_match:
-                after_tag = first[tag_match.end():].strip()
-                parts[0] = after_tag if after_tag else None
-                if not after_tag:
-                    parts.pop(0)
+            brand = tag_content
+            if remainder:
+                parts[0] = remainder
+            else:
+                parts = parts[1:]
+    else:
+        tag_match = PREFIX_TAG.match(first)
+        if tag_match:
+            after_tag = first[tag_match.end():].strip()
+            if after_tag:
+                parts[0] = after_tag
+            else:
+                parts = parts[1:]
 
     parts = [p for p in parts if p]
+    if not parts:
+        return None
 
     code = paren_code
     if parts and CODE_RE.match(parts[-1]):
         if code is None:
             code = parts[-1]
-        parts.pop()
+        parts = parts[:-1]
 
     if not parts:
         return None
@@ -124,6 +134,9 @@ def parse_title_by_logic(full_title):
 
 
 def extract_with_ai(full_title):
+    if not openai_client:
+        return "미기재", full_title, "미기재"
+
     try:
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
@@ -149,6 +162,10 @@ def extract_product_info(full_title):
     result = parse_title_by_logic(full_title)
     if result is not None:
         return result
+
+    if not openai_client:
+        return "미기재", full_title, "미기재"
+
     logger.info(f"  → AI 처리: {full_title}")
     return extract_with_ai(full_title)
 
@@ -175,10 +192,9 @@ async def crawl_kakao_store():
         logger.info(f"URL 접속 중: {CATEGORY_URL}")
         await page.goto(CATEGORY_URL, wait_until="networkidle", timeout=60000)
 
-        # 상품 목록이 뜰 때까지 대기
         try:
             await page.wait_for_selector("li.ng-star-inserted .item_product", timeout=15000)
-        except:
+        except Exception:
             logger.warning("상품 목록 셀렉터를 찾을 수 없습니다. (로드 지연 혹은 차단)")
             await page.screenshot(path="kakao_list_debug.png")
 
@@ -217,11 +233,10 @@ async def crawl_kakao_store():
             except Exception as e:
                 logger.error(f"리스트 항목 추출 중 에러: {e}")
 
-        # 제한된 수만 수집하거나 전체 수집 (지금은 전체)
         for count, item in enumerate(product_links, 1):
             if count % 10 == 0:
                 logger.info(f"[{count}/{len(product_links)}] 처리 중...")
-            
+
             brand, product_name, product_code = extract_product_info(item['full_title'])
 
             try:
