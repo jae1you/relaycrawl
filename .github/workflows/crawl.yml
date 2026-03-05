@@ -2,8 +2,8 @@ name: Weekly Crawl
 
 on:
   schedule:
-    # 매주 목요일 한국시간 오후 1시 = UTC 04:00 (목요일 = 4)
-    - cron: '0 4 * * 4'
+    # 매일 한국시간 오후 7시 = UTC 10:00
+    - cron: '0 10 * * *'
   workflow_dispatch:  # 수동 실행 버튼도 활성화
 
 jobs:
