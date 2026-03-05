@@ -1,15 +1,15 @@
-name: Weekly Crawl
+name: Daily Crawl
 
 on:
   schedule:
     # 매일 한국시간 오후 7시 = UTC 10:00
     - cron: '0 10 * * *'
-  workflow_dispatch:  # 수동 실행 버튼도 활성화
+  workflow_dispatch:
 
 jobs:
   crawl:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120  # 최대 2시간 (대량 수집 대비)
+    runs-on: self-hosted
+    timeout-minutes: 120
 
     steps:
       - name: 저장소 체크아웃
@@ -25,10 +25,17 @@ jobs:
         run: |
           pip install -r requirements.txt
           playwright install chromium
-          playwright install-deps chromium
+
+      - name: Linux 의존 패키지 설치 (Playwright)
+        if: runner.os == 'Linux'
+        run: playwright install-deps chromium
 
       - name: credentials.json 생성 (Secret → 파일)
-        run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+        shell: pwsh
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: |
+          Set-Content -Path credentials.json -Value $env:GOOGLE_CREDENTIALS -Encoding UTF8
 
       - name: 네이버 MZ아울렛 크롤링
         run: python naver_crawler_gsheet.py
