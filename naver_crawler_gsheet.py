@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import random
 import re
 from datetime import datetime
 
@@ -13,9 +14,13 @@ from gsheet_utils import save_to_google_sheets
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-STORE_URL = "https://smartstore.naver.com/lux_man/category/ALL"
+STORE_URLS = [
+    "https://smartstore.naver.com/lux_man/category/ALL",
+    "https://m.smartstore.naver.com/lux_man/category/ALL",
+    "https://brand.naver.com/lux_man/category/ALL",
+]
 PRODUCTS_PER_PAGE = 40
-MAX_PAGE_RETRY = 3
+MAX_PAGE_RETRY = 6
 CODE_RE = re.compile(r'^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d]{6,20}$')
 
 
@@ -156,6 +161,36 @@ def _is_blocked_or_error(title, html):
     return any(x in body for x in ["시스템오류", "forbidden", "captcha", "차단"])
 
 
+def _build_page_urls(page_no):
+    urls = []
+    for base in STORE_URLS:
+        sep = "&" if "?" in base else "?"
+        urls.append(f"{base}{sep}cp={page_no}")
+    return urls
+
+
+async def _new_context(browser):
+    context = await browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        viewport={"width": 1920, "height": 1080},
+        locale="ko-KR",
+        timezone_id="Asia/Seoul",
+        extra_http_headers={
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+            "DNT": "1",
+            "Upgrade-Insecure-Requests": "1",
+        },
+    )
+    await context.add_init_script(
+        """
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        window.chrome = window.chrome || { runtime: {} };
+        Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR', 'ko', 'en-US', 'en'] });
+        """
+    )
+    return context
+
+
 async def crawl_naver_store():
     all_results = []
     current_page = 1
@@ -166,25 +201,34 @@ async def crawl_naver_store():
 
     async with Stealth().use_async(async_playwright()) as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080},
-            locale="ko-KR",
-            timezone_id="Asia/Seoul",
-        )
+        context = await _new_context(browser)
         page = await context.new_page()
 
         while True:
-            url = f"{STORE_URL}?cp={current_page}"
-            logger.info(f"[{current_page}] 페이지 접속 중: {url}")
+            page_urls = _build_page_urls(current_page)
+            logger.info(f"[{current_page}] 페이지 접속 후보: {page_urls}")
 
             state = None
             html = ""
 
             for attempt in range(1, MAX_PAGE_RETRY + 1):
                 try:
+                    # 반복 차단 회피를 위해 주기적으로 컨텍스트/페이지 재생성
+                    if attempt in (3, 5):
+                        try:
+                            await page.close()
+                        except Exception:
+                            pass
+                        try:
+                            await context.close()
+                        except Exception:
+                            pass
+                        context = await _new_context(browser)
+                        page = await context.new_page()
+
+                    url = page_urls[(attempt - 1) % len(page_urls)]
                     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                    await page.wait_for_timeout(1500)
+                    await page.wait_for_timeout(1200 + random.randint(0, 1400))
 
                     title = await page.title()
                     html = await page.content()
@@ -195,7 +239,7 @@ async def crawl_naver_store():
                         if attempt == MAX_PAGE_RETRY:
                             await page.screenshot(path=f"naver_block_p{current_page}.png")
                             break
-                        await asyncio.sleep(3 * attempt)
+                        await asyncio.sleep(2 + attempt)
                         continue
 
                     state = await _extract_state(page)
@@ -209,14 +253,14 @@ async def crawl_naver_store():
                             f.write(html)
                         break
 
-                    await asyncio.sleep(2 * attempt)
+                    await asyncio.sleep(1 + attempt)
 
                 except Exception as e:
                     logger.error(f"[{current_page}] 페이지 로드 에러 (시도 {attempt}/{MAX_PAGE_RETRY}): {e}")
                     if attempt == MAX_PAGE_RETRY:
                         await page.screenshot(path=f"naver_error_p{current_page}.png")
                         break
-                    await asyncio.sleep(2 * attempt)
+                    await asyncio.sleep(1 + attempt)
 
             if not state:
                 logger.error(f"[{current_page}] 페이지 데이터를 추출하지 못해 크롤링을 종료합니다.")
