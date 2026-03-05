@@ -27,6 +27,8 @@ async def crawl_naver_store():
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             viewport={'width': 1920, 'height': 1080}
         )
+        page = await context.new_page()
+
         while True:
             url = f"{STORE_URL}?cp={current_page}"
             logger.info(f"[{current_page}] 페이지 접속 중: {url}")
