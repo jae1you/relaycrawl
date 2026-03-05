@@ -76,7 +76,19 @@ def _walk_dict_paths(data, paths):
 
 
 def _parse_products_from_state(state):
-    category_root = state.get("category", {}) if isinstance(state, dict) else {}
+    if not isinstance(state, dict):
+        return [], None
+
+    # 최신 스마트스토어 구조: categoryProducts.simpleProducts
+    category_products = state.get("categoryProducts", {})
+    if isinstance(category_products, dict):
+        cp_products = category_products.get("simpleProducts", []) or []
+        cp_total = category_products.get("totalCount")
+        if isinstance(cp_products, list) and cp_products:
+            return cp_products, cp_total
+
+    # 구형 구조: category.{key}.simpleProducts
+    category_root = state.get("category", {})
     category_node = category_root.get("A") if isinstance(category_root, dict) and "A" in category_root else None
     if category_node is None and isinstance(category_root, dict) and category_root:
         first_key = next(iter(category_root), None)
@@ -88,28 +100,30 @@ def _parse_products_from_state(state):
     if isinstance(category_node, dict):
         products = category_node.get("simpleProducts", []) or []
         total_count = category_node.get("totalCount")
+        if products:
+            return products, total_count
 
-    if not products:
-        fallback_products = _walk_dict_paths(
-            state,
-            [
-                ("smartStore", "category", "product", "list", "content"),
-                ("smartStore", "category", "product", "simpleItemList", "content"),
-                ("search", "products"),
-            ],
-        )
-        if isinstance(fallback_products, list):
-            products = fallback_products
+    # 추가 fallback
+    fallback_products = _walk_dict_paths(
+        state,
+        [
+            ("smartStore", "category", "product", "list", "content"),
+            ("smartStore", "category", "product", "simpleItemList", "content"),
+            ("search", "products"),
+        ],
+    )
+    if isinstance(fallback_products, list):
+        products = fallback_products
 
-        fallback_total = _walk_dict_paths(
-            state,
-            [
-                ("smartStore", "category", "product", "list", "totalCount"),
-                ("smartStore", "category", "product", "simpleItemList", "totalCount"),
-            ],
-        )
-        if isinstance(fallback_total, int):
-            total_count = fallback_total
+    fallback_total = _walk_dict_paths(
+        state,
+        [
+            ("smartStore", "category", "product", "list", "totalCount"),
+            ("smartStore", "category", "product", "simpleItemList", "totalCount"),
+        ],
+    )
+    if isinstance(fallback_total, int):
+        total_count = fallback_total
 
     return products, total_count
 
@@ -325,3 +339,4 @@ async def crawl_naver_store():
 
 if __name__ == "__main__":
     asyncio.run(crawl_naver_store())
+
