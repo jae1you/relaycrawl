@@ -20,11 +20,13 @@ BASE_URL = "https://store.kakao.com"
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+if not openai_client:
+    logger.warning("OPENAI_API_KEY 미설정: 카카오 제목 AI fallback 비활성화")
 
 CODE_RE = re.compile(r'^(?=.*[A-Za-z])(?=.*[0-9])[A-Za-z0-9]{13,14}$')
 CODE_IN_PAREN = re.compile(r'\(([A-Za-z0-9]{13,14})\)')
 PREFIX_TAG = re.compile(r'^(\[[^\]]+\]|\([^)]+\))\s*')
-PROMO_RE = re.compile(r'%|BEST|특가|기획전|카탈로그', re.IGNORECASE)
+PROMO_RE = re.compile(r'BEST|특가|기획전|카탈로그', re.IGNORECASE)
 DISCOUNT_RATE_RE = re.compile(r'discountRate=(\d+)%')
 
 NOISE_TAGS = {'단독특가', '특가', '할인', '쿠폰', '타임세일', '한정', '추가할인', '신상', '세일'}
@@ -50,6 +52,43 @@ SYSTEM_PROMPT = """당신은 패션 쇼핑몰 상품 제목에서 브랜드명, 
 
 반드시 아래 JSON 형식으로만 응답하세요:
 {"brand": "브랜드명", "product_name": "상품명", "product_code": "상품코드"}"""
+
+
+def _normalize_price_text(text):
+    if not text:
+        return "0"
+    nums = re.findall(r'\d[\d,]*', text)
+    return nums[0] if nums else "0"
+
+
+async def _first_text(page, selectors):
+    for sel in selectors:
+        el = await page.query_selector(sel)
+        if el:
+            txt = (await el.inner_text()).strip()
+            if txt:
+                return txt
+    return ""
+
+
+async def _extract_prices(page):
+    try:
+        await page.wait_for_selector("div.info_price, div.info_regular", timeout=7000)
+    except Exception:
+        pass
+
+    original_raw = await _first_text(page, [
+        "div.info_regular span.txt_price",
+        "div.info_regular .txt_price",
+        ".info_regular .txt_price",
+    ])
+    discount_raw = await _first_text(page, [
+        "div.info_price span.txt_price",
+        "div.info_price .txt_price",
+        ".info_price .txt_price",
+    ])
+
+    return _normalize_price_text(discount_raw), _normalize_price_text(original_raw)
 
 
 def parse_title_by_logic(full_title):
@@ -241,12 +280,9 @@ async def crawl_kakao_store():
 
             try:
                 await page.goto(item['detail_link'], wait_until="domcontentloaded", timeout=60000)
+                await page.wait_for_timeout(700)
 
-                original_price_el = await page.query_selector("div.info_regular span.txt_price")
-                original_price = (await original_price_el.inner_text()).replace("정가:", "").strip() if original_price_el else "0"
-
-                discount_price_el = await page.query_selector("div.info_price span.txt_price")
-                discount_price = await discount_price_el.inner_text() if discount_price_el else "0"
+                discount_price, original_price = await _extract_prices(page)
 
                 discount_rate = item['discount_rate']
                 discount_rate_el = await page.query_selector("div.info_price span.txt_sale")
@@ -291,4 +327,3 @@ async def crawl_kakao_store():
 
 if __name__ == "__main__":
     asyncio.run(crawl_kakao_store())
-
