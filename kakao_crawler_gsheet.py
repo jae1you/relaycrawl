@@ -5,7 +5,7 @@ import os
 import logging
 from urllib.parse import parse_qs
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth
+from playwright_stealth import Stealth
 from datetime import datetime
 from openai import OpenAI
 from gsheet_utils import save_to_google_sheets
@@ -165,109 +165,109 @@ async def crawl_kakao_store():
     logger.info("카카오 세이브프라자 크롤링 시작...")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={'width': 1920, 'height': 1080}
-        )
-        page = await context.new_page()
-        await stealth(page)
+        async with Stealth().use_async(p):
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                viewport={'width': 1920, 'height': 1080}
+            )
+            page = await context.new_page()
 
-        logger.info(f"URL 접속 중: {CATEGORY_URL}")
-        await page.goto(CATEGORY_URL, wait_until="networkidle", timeout=60000)
+            logger.info(f"URL 접속 중: {CATEGORY_URL}")
+            await page.goto(CATEGORY_URL, wait_until="networkidle", timeout=60000)
 
-        # 상품 목록이 뜰 때까지 대기
-        try:
-            await page.wait_for_selector("li.ng-star-inserted .item_product", timeout=15000)
-        except:
-            logger.warning("상품 목록 셀렉터를 찾을 수 없습니다. (로드 지연 혹은 차단)")
-            await page.screenshot(path="kakao_list_debug.png")
-
-        logger.info("모든 상품을 로드하기 위해 스크롤 중...")
-        last_height = await page.evaluate("document.body.scrollHeight")
-        while True:
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await asyncio.sleep(2)
-            new_height = await page.evaluate("document.body.scrollHeight")
-            if new_height == last_height:
-                break
-            last_height = new_height
-
-        product_elements = await page.query_selector_all("li.ng-star-inserted .item_product")
-        logger.info(f"총 {len(product_elements)}개의 상품을 발견했습니다.")
-
-        product_links = []
-        for el in product_elements:
+            # 상품 목록이 뜰 때까지 대기
             try:
-                title_el = await el.query_selector("span.name_product")
-                full_title = (await title_el.inner_text()).strip() if title_el else ""
+                await page.wait_for_selector("li.ng-star-inserted .item_product", timeout=15000)
+            except:
+                logger.warning("상품 목록 셀렉터를 찾을 수 없습니다. (로드 지연 혹은 차단)")
+                await page.screenshot(path="kakao_list_debug.png")
 
-                link_el = await el.query_selector("a.link_product")
-                href = await link_el.get_attribute("href") if link_el else ""
-                detail_link = BASE_URL + href if href and href.startswith("/") else href
+            logger.info("모든 상품을 로드하기 위해 스크롤 중...")
+            last_height = await page.evaluate("document.body.scrollHeight")
+            while True:
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await asyncio.sleep(2)
+                new_height = await page.evaluate("document.body.scrollHeight")
+                if new_height == last_height:
+                    break
+                last_height = new_height
 
-                tiara_el = await el.query_selector("[data-tiara-custom]")
-                tiara_custom = await tiara_el.get_attribute("data-tiara-custom") if tiara_el else ""
+            product_elements = await page.query_selector_all("li.ng-star-inserted .item_product")
+            logger.info(f"총 {len(product_elements)}개의 상품을 발견했습니다.")
 
-                if detail_link:
-                    product_links.append({
-                        "full_title": full_title,
-                        "detail_link": detail_link,
-                        "discount_rate": parse_discount_rate(tiara_custom)
+            product_links = []
+            for el in product_elements:
+                try:
+                    title_el = await el.query_selector("span.name_product")
+                    full_title = (await title_el.inner_text()).strip() if title_el else ""
+
+                    link_el = await el.query_selector("a.link_product")
+                    href = await link_el.get_attribute("href") if link_el else ""
+                    detail_link = BASE_URL + href if href and href.startswith("/") else href
+
+                    tiara_el = await el.query_selector("[data-tiara-custom]")
+                    tiara_custom = await tiara_el.get_attribute("data-tiara-custom") if tiara_el else ""
+
+                    if detail_link:
+                        product_links.append({
+                            "full_title": full_title,
+                            "detail_link": detail_link,
+                            "discount_rate": parse_discount_rate(tiara_custom)
+                        })
+                except Exception as e:
+                    logger.error(f"리스트 항목 추출 중 에러: {e}")
+
+            # 제한된 수만 수집하거나 전체 수집 (지금은 전체)
+            for count, item in enumerate(product_links, 1):
+                if count % 10 == 0:
+                    logger.info(f"[{count}/{len(product_links)}] 처리 중...")
+                
+                brand, product_name, product_code = extract_product_info(item['full_title'])
+
+                try:
+                    await page.goto(item['detail_link'], wait_until="networkidle", timeout=30000)
+
+                    original_price_el = await page.query_selector("div.info_regular span.txt_price")
+                    original_price = (await original_price_el.inner_text()).replace("정가:", "").strip() if original_price_el else "0"
+
+                    discount_price_el = await page.query_selector("div.info_price span.txt_price")
+                    discount_price = await discount_price_el.inner_text() if discount_price_el else "0"
+
+                    discount_rate = item['discount_rate']
+                    discount_rate_el = await page.query_selector("div.info_price span.txt_sale")
+                    if discount_rate_el:
+                        detail_rate_text = await discount_rate_el.inner_text()
+                        if "%" in detail_rate_text:
+                            discount_rate = detail_rate_text.split(":")[-1].strip()
+
+                    results.append({
+                        "스토어": "카카오 세이브프라자",
+                        "브랜드명": brand,
+                        "할인율": discount_rate,
+                        "상품명": product_name,
+                        "상품코드": product_code,
+                        "할인가": discount_price,
+                        "원가": original_price,
+                        "상품상세페이지링크": item['detail_link'],
+                        "수집일시": now
                     })
-            except Exception as e:
-                logger.error(f"리스트 항목 추출 중 에러: {e}")
 
-        # 제한된 수만 수집하거나 전체 수집 (지금은 전체)
-        for count, item in enumerate(product_links, 1):
-            if count % 10 == 0:
-                logger.info(f"[{count}/{len(product_links)}] 처리 중...")
-            
-            brand, product_name, product_code = extract_product_info(item['full_title'])
+                except Exception as e:
+                    logger.error(f"상세 페이지({item['detail_link']}) 추출 에러: {e}")
+                    results.append({
+                        "스토어": "카카오 세이브프라자",
+                        "브랜드명": brand,
+                        "할인율": item['discount_rate'],
+                        "상품명": product_name,
+                        "상품코드": product_code,
+                        "할인가": "Error",
+                        "원가": "Error",
+                        "상품상세페이지링크": item['detail_link'],
+                        "수집일시": now
+                    })
 
-            try:
-                await page.goto(item['detail_link'], wait_until="networkidle", timeout=30000)
-
-                original_price_el = await page.query_selector("div.info_regular span.txt_price")
-                original_price = (await original_price_el.inner_text()).replace("정가:", "").strip() if original_price_el else "0"
-
-                discount_price_el = await page.query_selector("div.info_price span.txt_price")
-                discount_price = await discount_price_el.inner_text() if discount_price_el else "0"
-
-                discount_rate = item['discount_rate']
-                discount_rate_el = await page.query_selector("div.info_price span.txt_sale")
-                if discount_rate_el:
-                    detail_rate_text = await discount_rate_el.inner_text()
-                    if "%" in detail_rate_text:
-                        discount_rate = detail_rate_text.split(":")[-1].strip()
-
-                results.append({
-                    "스토어": "카카오 세이브프라자",
-                    "브랜드명": brand,
-                    "할인율": discount_rate,
-                    "상품명": product_name,
-                    "상품코드": product_code,
-                    "할인가": discount_price,
-                    "원가": original_price,
-                    "상품상세페이지링크": item['detail_link'],
-                    "수집일시": now
-                })
-
-            except Exception as e:
-                logger.error(f"상세 페이지({item['detail_link']}) 추출 에러: {e}")
-                results.append({
-                    "스토어": "카카오 세이브프라자",
-                    "브랜드명": brand,
-                    "할인율": item['discount_rate'],
-                    "상품명": product_name,
-                    "상품코드": product_code,
-                    "할인가": "Error",
-                    "원가": "Error",
-                    "상품상세페이지링크": item['detail_link'],
-                    "수집일시": now
-                })
-
-        await browser.close()
+            await browser.close()
 
     if results:
         save_to_google_sheets(results, "카카오 세이브프라자")
