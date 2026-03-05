@@ -5,7 +5,7 @@ import os
 import logging
 from urllib.parse import parse_qs
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
+from playwright_stealth import stealth
 from datetime import datetime
 from openai import OpenAI
 from gsheet_utils import save_to_google_sheets
@@ -171,7 +171,7 @@ async def crawl_kakao_store():
             viewport={'width': 1920, 'height': 1080}
         )
         page = await context.new_page()
-        await stealth_async(page)
+        await stealth(page)
 
         logger.info(f"URL 접속 중: {CATEGORY_URL}")
         await page.goto(CATEGORY_URL, wait_until="networkidle", timeout=60000)

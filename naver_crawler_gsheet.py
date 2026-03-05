@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
+from playwright_stealth import stealth
 from datetime import datetime
 from gsheet_utils import save_to_google_sheets
 
@@ -29,7 +29,7 @@ async def crawl_naver_store():
         )
         page = await context.new_page()
         # 스텔스 모드 적용
-        await stealth_async(page)
+        await stealth(page)
 
         while True:
             url = f"{STORE_URL}?cp={current_page}"
