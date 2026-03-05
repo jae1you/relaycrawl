@@ -1,8 +1,14 @@
 import asyncio
 import json
+import logging
 from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 from datetime import datetime
 from gsheet_utils import save_to_google_sheets
+
+# 로그 설정
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
 STORE_URL = "https://smartstore.naver.com/lux_man/category/ALL"
 
@@ -13,6 +19,8 @@ async def crawl_naver_store():
     total_count = None
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    logger.info("네이버 MZ아울렛 크롤링 시작...")
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
@@ -20,28 +28,50 @@ async def crawl_naver_store():
             viewport={'width': 1920, 'height': 1080}
         )
         page = await context.new_page()
+        # 스텔스 모드 적용
+        await stealth_async(page)
 
         while True:
             url = f"{STORE_URL}?cp={current_page}"
-            print(f"[{current_page}] 페이지 접속 중: {url}")
+            logger.info(f"[{current_page}] 페이지 접속 중: {url}")
 
             try:
                 await page.goto(url, wait_until="networkidle", timeout=60000)
+                
+                # 페이지 제목 확인 (차단 여부 확인용)
+                title = await page.title()
+                logger.info(f"페이지 제목: {title}")
+                
+                if "차단" in title or "Forbidden" in title:
+                    logger.error("네이버에서 접근이 차단되었습니다.")
+                    break
+
                 content = await page.content()
 
                 start_str = "window.__PRELOADED_STATE__="
                 idx = content.find(start_str)
                 if idx == -1:
-                    print("JSON 데이터를 찾을 수 없습니다. (종료 혹은 차단)")
+                    logger.warning("JSON 데이터를 찾을 수 없습니다. (종료 혹은 차단 가능성)")
+                    # 디버깅을 위해 스크린샷 저장 (CI 환경용)
+                    if current_page == 1:
+                        await page.screenshot(path="naver_block_debug.png")
+                        logger.info("디버그용 스크린샷 저장 완료: naver_block_debug.png")
                     break
 
-                json_str = content[idx + len(start_str):content.find("</script>", idx)].strip().rstrip(";")
+                # JSON 추출 logic 개선: 다음 <script> 태그나 변수 선언 전까지 추출
+                json_part = content[idx + len(start_str):]
+                end_idx = json_part.find("</script>")
+                if end_idx != -1:
+                    json_str = json_part[:end_idx].strip().rstrip(";")
+                else:
+                    json_str = json_part.strip().rstrip(";")
+
                 data = json.loads(json_str)
 
                 category_data = data.get('category', {})
                 category_key = next(iter(category_data), None)
                 if category_key is None:
-                    print("카테고리 데이터 없음.")
+                    logger.warning("카테고리 데이터가 없습니다.")
                     break
 
                 cat_info = category_data[category_key]
@@ -49,10 +79,10 @@ async def crawl_naver_store():
 
                 if total_count is None:
                     total_count = cat_info.get('totalCount', 0)
-                    print(f"전체 상품 개수: {total_count}")
+                    logger.info(f"전체 상품 개수: {total_count}")
 
                 if not products:
-                    print(f"[{current_page}] 페이지에 상품이 없습니다. (수집 완료)")
+                    logger.info(f"[{current_page}] 페이지에 상품이 없습니다. (수집 완료)")
                     break
 
                 for p_item in products:
@@ -75,26 +105,27 @@ async def crawl_naver_store():
                         "수집일시": now
                     })
 
-                print(f"현재까지 {len(all_results)}개 수집됨.")
+                logger.info(f"현재까지 {len(all_results)}개 수집됨.")
 
                 if current_page * 40 >= total_count:
-                    print("전체 상품 수집 완료.")
+                    logger.info("전체 상품 수집 완료.")
                     break
 
                 current_page += 1
+                await asyncio.sleep(1) # 부하 조절
 
             except Exception as e:
-                print(f"[{current_page}] 페이지 처리 중 에러: {e}")
+                logger.error(f"[{current_page}] 페이지 처리 중 에러: {e}")
                 break
 
         await browser.close()
 
-    print(f"\n전체 수집 완료: 총 {len(all_results)}개")
+    logger.info(f"전체 수집 완료: 총 {len(all_results)}개")
 
     if all_results:
         save_to_google_sheets(all_results, "MZ아울렛")
     else:
-        print("수집된 데이터가 없습니다.")
+        logger.warning("수집된 데이터가 없습니다.")
 
 
 if __name__ == "__main__":

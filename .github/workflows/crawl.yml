@@ -40,3 +40,13 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: python kakao_crawler_gsheet.py
+
+      - name: 디버그 스크린샷 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: |
+            *.png
+            *.html
+          retention-days: 7

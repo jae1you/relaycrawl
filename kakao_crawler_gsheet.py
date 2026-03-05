@@ -2,11 +2,17 @@ import asyncio
 import re
 import json
 import os
+import logging
 from urllib.parse import parse_qs
 from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 from datetime import datetime
 from openai import OpenAI
 from gsheet_utils import save_to_google_sheets
+
+# 로그 설정
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
 CATEGORY_URL = "https://store.kakao.com/kolonsaveplaza/category?sort=POPULAR_SALE_COUNT&showMenu=false"
 BASE_URL = "https://store.kakao.com"
@@ -135,7 +141,7 @@ def extract_with_ai(full_title):
             result.get("product_code", "미기재") or "미기재"
         )
     except Exception as e:
-        print(f"  AI 추출 실패 ({e}), 원본 제목 사용")
+        logger.error(f"  AI 추출 실패 ({e}), 원본 제목 사용")
         return "미기재", full_title, "미기재"
 
 
@@ -143,7 +149,7 @@ def extract_product_info(full_title):
     result = parse_title_by_logic(full_title)
     if result is not None:
         return result
-    print(f"  → AI 처리: {full_title}")
+    logger.info(f"  → AI 처리: {full_title}")
     return extract_with_ai(full_title)
 
 
@@ -156,17 +162,28 @@ async def crawl_kakao_store():
     results = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    logger.info("카카오 세이브프라자 크롤링 시작...")
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080}
         )
         page = await context.new_page()
+        await stealth_async(page)
 
-        print(f"URL 접속 중: {CATEGORY_URL}")
-        await page.goto(CATEGORY_URL, wait_until="networkidle")
+        logger.info(f"URL 접속 중: {CATEGORY_URL}")
+        await page.goto(CATEGORY_URL, wait_until="networkidle", timeout=60000)
 
-        print("모든 상품을 로드하기 위해 스크롤 중...")
+        # 상품 목록이 뜰 때까지 대기
+        try:
+            await page.wait_for_selector("li.ng-star-inserted .item_product", timeout=15000)
+        except:
+            logger.warning("상품 목록 셀렉터를 찾을 수 없습니다. (로드 지연 혹은 차단)")
+            await page.screenshot(path="kakao_list_debug.png")
+
+        logger.info("모든 상품을 로드하기 위해 스크롤 중...")
         last_height = await page.evaluate("document.body.scrollHeight")
         while True:
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -177,7 +194,7 @@ async def crawl_kakao_store():
             last_height = new_height
 
         product_elements = await page.query_selector_all("li.ng-star-inserted .item_product")
-        print(f"총 {len(product_elements)}개의 상품을 발견했습니다.")
+        logger.info(f"총 {len(product_elements)}개의 상품을 발견했습니다.")
 
         product_links = []
         for el in product_elements:
@@ -199,22 +216,24 @@ async def crawl_kakao_store():
                         "discount_rate": parse_discount_rate(tiara_custom)
                     })
             except Exception as e:
-                print(f"리스트 항목 추출 중 에러: {e}")
+                logger.error(f"리스트 항목 추출 중 에러: {e}")
 
+        # 제한된 수만 수집하거나 전체 수집 (지금은 전체)
         for count, item in enumerate(product_links, 1):
-            print(f"[{count}/{len(product_links)}] 처리 중: {item['full_title']}")
+            if count % 10 == 0:
+                logger.info(f"[{count}/{len(product_links)}] 처리 중...")
+            
             brand, product_name, product_code = extract_product_info(item['full_title'])
 
             try:
-                await page.goto(item['detail_link'], wait_until="networkidle")
+                await page.goto(item['detail_link'], wait_until="networkidle", timeout=30000)
 
                 original_price_el = await page.query_selector("div.info_regular span.txt_price")
-                original_price = (await original_price_el.inner_text()).replace("정가:", "").strip() if original_price_el else "미기재"
+                original_price = (await original_price_el.inner_text()).replace("정가:", "").strip() if original_price_el else "0"
 
                 discount_price_el = await page.query_selector("div.info_price span.txt_price")
-                discount_price = await discount_price_el.inner_text() if discount_price_el else ""
+                discount_price = await discount_price_el.inner_text() if discount_price_el else "0"
 
-                # 할인율: 상세 페이지에 없으면 리스트에서 수집한 값 사용
                 discount_rate = item['discount_rate']
                 discount_rate_el = await page.query_selector("div.info_price span.txt_sale")
                 if discount_rate_el:
@@ -235,7 +254,7 @@ async def crawl_kakao_store():
                 })
 
             except Exception as e:
-                print(f"상세 페이지({item['detail_link']}) 추출 에러: {e}")
+                logger.error(f"상세 페이지({item['detail_link']}) 추출 에러: {e}")
                 results.append({
                     "스토어": "카카오 세이브프라자",
                     "브랜드명": brand,
@@ -253,7 +272,7 @@ async def crawl_kakao_store():
     if results:
         save_to_google_sheets(results, "카카오 세이브프라자")
     else:
-        print("수집된 데이터가 없습니다.")
+        logger.warning("수집된 데이터가 없습니다.")
 
 
 if __name__ == "__main__":
