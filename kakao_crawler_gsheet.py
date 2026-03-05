@@ -190,7 +190,7 @@ async def crawl_kakao_store():
         page = await context.new_page()
 
         logger.info(f"URL 접속 중: {CATEGORY_URL}")
-        await page.goto(CATEGORY_URL, wait_until="networkidle", timeout=60000)
+        await page.goto(CATEGORY_URL, wait_until="domcontentloaded", timeout=120000)
 
         try:
             await page.wait_for_selector("li.ng-star-inserted .item_product", timeout=15000)
@@ -240,7 +240,7 @@ async def crawl_kakao_store():
             brand, product_name, product_code = extract_product_info(item['full_title'])
 
             try:
-                await page.goto(item['detail_link'], wait_until="networkidle", timeout=30000)
+                await page.goto(item['detail_link'], wait_until="domcontentloaded", timeout=60000)
 
                 original_price_el = await page.query_selector("div.info_regular span.txt_price")
                 original_price = (await original_price_el.inner_text()).replace("정가:", "").strip() if original_price_el else "0"
@@ -291,3 +291,4 @@ async def crawl_kakao_store():
 
 if __name__ == "__main__":
     asyncio.run(crawl_kakao_store())
+
