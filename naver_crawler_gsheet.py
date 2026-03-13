@@ -23,6 +23,16 @@ PRODUCTS_PER_PAGE = 40
 MAX_PAGE_RETRY = 6
 CODE_RE = re.compile(r'^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d]{6,20}$')
 
+# 랜덤 User-Agent 풀 (최신 Chrome 버전들)
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+]
+
 
 def _extract_json_object(text, marker):
     marker_idx = text.find(marker)
@@ -183,16 +193,38 @@ def _build_page_urls(page_no):
     return urls
 
 
+async def _human_like_behavior(page):
+    """인간처럼 보이는 행동 시뮬레이션 (스크롤, 마우스 이동)"""
+    try:
+        # 랜덤 스크롤
+        for _ in range(random.randint(2, 4)):
+            scroll_y = random.randint(200, 600)
+            await page.evaluate(f"window.scrollBy(0, {scroll_y})")
+            await asyncio.sleep(random.uniform(0.3, 0.8))
+        # 위로 살짝 스크롤 복귀
+        await page.evaluate("window.scrollTo(0, 0)")
+        await asyncio.sleep(random.uniform(0.2, 0.5))
+    except Exception:
+        pass
+
+
 async def _new_context(browser):
+    ua = random.choice(USER_AGENTS)
+    # 뷰포트 약간 랜덤화 (지문 다양화)
+    width = random.choice([1280, 1366, 1440, 1920])
+    height = random.choice([720, 768, 800, 900, 1080])
     context = await browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        viewport={"width": 1920, "height": 1080},
+        user_agent=ua,
+        viewport={"width": width, "height": height},
         locale="ko-KR",
         timezone_id="Asia/Seoul",
         extra_http_headers={
             "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
             "DNT": "1",
             "Upgrade-Insecure-Requests": "1",
+            "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
         },
     )
     await context.add_init_script(
@@ -200,6 +232,8 @@ async def _new_context(browser):
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         window.chrome = window.chrome || { runtime: {} };
         Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR', 'ko', 'en-US', 'en'] });
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
         """
     )
     return context
@@ -227,8 +261,9 @@ async def crawl_naver_store():
 
             for attempt in range(1, MAX_PAGE_RETRY + 1):
                 try:
-                    # 반복 차단 회피를 위해 주기적으로 컨텍스트/페이지 재생성
-                    if attempt in (3, 5):
+                    # 차단 회피: 재시도마다 또는 짝수 attempt마다 컨텍스트 재생성
+                    if attempt in (2, 4, 6):
+                        logger.info(f"[{current_page}] 컨텍스트 재생성 (attempt={attempt})")
                         try:
                             await page.close()
                         except Exception:
@@ -242,7 +277,11 @@ async def crawl_naver_store():
 
                     url = page_urls[(attempt - 1) % len(page_urls)]
                     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                    await page.wait_for_timeout(1200 + random.randint(0, 1400))
+
+                    # 인간 행동 시뮬레이션
+                    await _human_like_behavior(page)
+                    # 추가 대기 (2~4초)
+                    await asyncio.sleep(random.uniform(2.0, 4.0))
 
                     title = await page.title()
                     html = await page.content()
@@ -253,7 +292,10 @@ async def crawl_naver_store():
                         if attempt == MAX_PAGE_RETRY:
                             await page.screenshot(path=f"naver_block_p{current_page}.png")
                             break
-                        await asyncio.sleep(2 + attempt)
+                        # 지수 백오프: 차단 시 더 오래 대기
+                        backoff = min(5 * (2 ** attempt), 60)
+                        logger.info(f"[{current_page}] 차단 대기: {backoff}초")
+                        await asyncio.sleep(backoff)
                         continue
 
                     state = await _extract_state(page)
@@ -267,14 +309,17 @@ async def crawl_naver_store():
                             f.write(html)
                         break
 
-                    await asyncio.sleep(1 + attempt)
+                    # 지수 백오프
+                    backoff = min(3 * (2 ** attempt), 30)
+                    await asyncio.sleep(backoff)
 
                 except Exception as e:
                     logger.error(f"[{current_page}] 페이지 로드 에러 (시도 {attempt}/{MAX_PAGE_RETRY}): {e}")
                     if attempt == MAX_PAGE_RETRY:
                         await page.screenshot(path=f"naver_error_p{current_page}.png")
                         break
-                    await asyncio.sleep(1 + attempt)
+                    backoff = min(3 * (2 ** attempt), 30)
+                    await asyncio.sleep(backoff)
 
             if not state:
                 logger.error(f"[{current_page}] 페이지 데이터를 추출하지 못해 크롤링을 종료합니다.")
@@ -325,7 +370,10 @@ async def crawl_naver_store():
                 break
 
             current_page += 1
-            await asyncio.sleep(1)
+            # 페이지 간 랜덤 딜레이 (3~7초) - 차단 방지 핵심
+            delay = random.uniform(3.0, 7.0)
+            logger.info(f"다음 페이지 대기: {delay:.1f}초")
+            await asyncio.sleep(delay)
 
         await browser.close()
 
